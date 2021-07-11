@@ -5,6 +5,7 @@ defmodule Sample do
   alias Microsoft.Azure.Storage.{BlobStorage, BlobPolicy, Container, ContainerLease, Blob}
 
   import XmlBuilder
+  import Microsoft.Azure.Storage.SharedAccessSignature
 
   def person(id, first, last) do
     element(:person, %{id: id}, [
@@ -253,5 +254,54 @@ defmodule Sample do
       "00000000-1111-2222-3333-444444444444",
       "00000000-1111-2222-3333-555555555555"
     )
+  end
+
+  def sas1() do
+    new()
+    |> for_storage_account()
+    |> add_service_table()
+    |> add_service_queue()
+    |> add_service_queue()
+    |> add_service_queue()
+    |> add_resource_type_service()
+    |> add_resource_type_object()
+    |> add_permission_read()
+    |> ip_range("168.1.5.60-168.1.5.70")
+    # |> for_blob_service()
+    |> start_time(Timex.now())
+    |> expiry_time(Timex.now() |> Timex.add(Timex.Duration.from_hours(1)))
+    |> protocol("https")
+  end
+
+  def demo() do
+    sas1()
+    |> sign(%Storage{
+      cloud_environment_suffix: "core.windows.net",
+      account_name: "SAMPLE_STORAGE_ACCOUNT_NAME" |> System.get_env(),
+      account_key: "SAMPLE_STORAGE_ACCOUNT_KEY" |> System.get_env()
+    })
+    |> URI.decode_query()
+  end
+
+  def d2() do
+    new()
+    |> service_version(ApiVersion.get_api_version(:storage))
+    |> for_storage_account()
+    |> add_service_blob()
+    |> add_resource_type_container()
+    |> add_resource_blob_container()
+    |> add_permission_read()
+    |> add_permission_process()
+    |> add_permission_list()
+    |> start_time(Timex.now())
+    |> expiry_time(
+      Timex.now()
+      |> Timex.add(Timex.Duration.from_days(100))
+    )
+    |> sign(%Storage{
+      cloud_environment_suffix: "core.windows.net",
+      account_name: "SAMPLE_STORAGE_ACCOUNT_NAME" |> System.get_env(),
+      account_key: "SAMPLE_STORAGE_ACCOUNT_KEY" |> System.get_env()
+    })
   end
 end

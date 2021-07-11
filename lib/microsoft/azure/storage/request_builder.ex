@@ -3,17 +3,19 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
   alias Microsoft.Azure.Storage
   alias Microsoft.Azure.Storage.{RestClient, ApiVersion, DateTimeUtils, Container}
 
+  @json_library Application.get_env(:ex_microsoft_azure_storage, :json_library, Jason)
+
   def new_azure_storage_request(storage = %Storage{}), do: %{storage_context: storage}
 
   def method(request, m), do: request |> Map.put_new(:method, m)
 
   def url(request, u), do: request |> Map.put_new(:url, u)
 
-  def body(request, body),
-    do:
-      request
-      |> add_header("Content-Length", "#{body |> byte_size()}")
-      |> Map.put(:body, body)
+  def body(request, body) do
+    request
+    |> add_header("Content-Length", "#{body |> byte_size()}")
+    |> Map.put(:body, body)
+  end
 
   def add_header_content_md5(request) do
     body = request |> Map.get(:body)
@@ -28,9 +30,9 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
 
   # request |> Map.update!(:headers, &Map.merge(&1, headers))
   def add_header(request = %{headers: headers}, k, v) when headers != nil,
-    do: request |> Map.put(:headers, headers |> Map.put(k, v))
+    do: request |> Map.put(:headers, [{k, v} | headers])
 
-  def add_header(request, k, v), do: request |> Map.put(:headers, %{k => v})
+  def add_header(request, k, v), do: request |> Map.put(:headers, [{k, v}])
 
   @prefix_x_ms_meta "x-ms-meta-"
 
@@ -68,7 +70,7 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
       &Tesla.Multipart.add_field(
         &1,
         key,
-        Poison.encode!(value),
+        @json_library.encode!(value),
         headers: [{:"Content-Type", "application/json"}]
       )
     )
@@ -111,30 +113,29 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
 
   defp primary(account_name), do: account_name |> String.replace("-secondary", "")
 
-  defp canonicalized_headers(headers = %{}),
-    do:
-      headers
-      |> Enum.into([])
-      |> Enum.map(fn {k, v} -> {k |> String.downcase(), v} end)
-      |> Enum.filter(fn {k, _} -> k |> String.starts_with?("x-ms-") end)
-      |> Enum.sort()
-      |> Enum.map(fn {k, v} -> "#{k}:#{v}" end)
-      |> Enum.join("\n")
+  defp canonicalized_headers(headers) do
+    headers
+    |> Enum.map(fn {k, v} -> {k |> String.downcase(), v} end)
+    |> Enum.filter(fn {k, _} -> k |> String.starts_with?("x-ms-") end)
+    |> Enum.sort()
+    |> Enum.map(fn {k, v} -> "#{k}:#{v}" end)
+    |> Enum.join("\n")
+  end
 
-  def remove_empty_headers(request = %{headers: headers = %{}}) do
+  def remove_empty_headers(request = %{headers: headers}) when is_list(headers) do
     new_headers =
       headers
-      |> Enum.into([])
       |> Enum.filter(fn {_k, v} -> v != nil && String.length(v) > 0 end)
-      |> Enum.into(%{})
 
     request
     |> Map.put(:headers, new_headers)
   end
 
   defp get_header(headers, name) do
-    headers
-    |> Map.get(name)
+    case for {k, v} <- headers, k == name, do: v do
+      [result] -> result
+      [] -> nil
+    end
   end
 
   defp protect(
@@ -144,7 +145,7 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
            method: method,
            url: url,
            query: query,
-           headers: headers = %{},
+           headers: headers,
            storage_context:
              storage_context = %Storage{
                is_development_factory: is_development_factory,
@@ -194,7 +195,8 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
       |> Enum.join("\n")
 
     signature =
-      :crypto.hmac(:sha256, storage_context.account_key |> Base.decode64!(), stringToSign)
+      :hmac
+      |> :crypto.mac(:sha256, storage_context.account_key |> Base.decode64!(), stringToSign)
       |> Base.encode64()
 
     data
@@ -240,6 +242,7 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
       |> RestClient.new()
 
     request
+    |> add_header_if(request.method == :put, "Content-Type", "application/octet-stream")
     |> add_header("x-ms-date", DateTimeUtils.utc_now())
     |> add_header("x-ms-version", ApiVersion.get_api_version(:storage))
     |> remove_empty_headers()
@@ -248,6 +251,7 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
     |> protect()
     |> Enum.into([])
     |> (&RestClient.request(connection, &1)).()
+    |> elem(1)
   end
 
   def add_missing(map, key, value) do
@@ -256,12 +260,6 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
       %{} -> map |> Map.put(key, value)
     end
   end
-
-  def decode(%Tesla.Env{status: 200, body: body}), do: Poison.decode(body)
-  def decode(response), do: {:error, response}
-  def decode(%Tesla.Env{status: 200} = env, false), do: {:ok, env}
-  def decode(%Tesla.Env{status: 200, body: body}, struct), do: Poison.decode(body, as: struct)
-  def decode(response, _struct), do: {:error, response}
 
   defmodule Responses do
     def error_response(),
@@ -347,13 +345,9 @@ defmodule Microsoft.Azure.Storage.RequestBuilder do
               is_function(transform, 1) do
     http_header = http_header |> String.downcase()
 
-    if response.headers |> Map.has_key?(http_header) do
-      case response.headers[http_header] do
-        nil -> response
-        val -> response |> Map.put(key_to_set, val |> transform.())
-      end
-    else
-      response
+    case get_header(response.headers, http_header) do
+      nil -> response
+      val -> response |> Map.put(key_to_set, val |> transform.())
     end
   end
 

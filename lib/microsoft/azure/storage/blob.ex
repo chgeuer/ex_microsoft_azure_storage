@@ -1,4 +1,5 @@
 defmodule Microsoft.Azure.Storage.Blob do
+  require Logger
   import SweetXml
   use NamedArgs
   # import SweetXml
@@ -6,15 +7,18 @@ defmodule Microsoft.Azure.Storage.Blob do
   alias Microsoft.Azure.Storage.{Container}
 
   @enforce_keys [:container, :blob_name]
+  @max_concurrency 3
+  @max_number_of_blocks 50_000
+  @mega_byte 1024 * 1024
+  @max_block_size 4 * @mega_byte
+  @max_block_size_100MB 100 * @mega_byte
+
   defstruct [:container, :blob_name]
 
   def new(container = %Container{}, blob_name)
       when is_binary(blob_name),
       do: %__MODULE__{container: container, blob_name: blob_name}
 
-  @max_block_size_100MB 104_857_600
-
-  # |> Base.encode64()
   def to_block_id(block_id) when is_binary(block_id), do: block_id
   def to_block_id(block_id) when is_integer(block_id), do: <<block_id::120>> |> Base.encode64()
 
@@ -97,7 +101,7 @@ defmodule Microsoft.Azure.Storage.Blob do
   """
 
   defp serialize_block_list(block_list),
-    do: @template_block_list |> EEx.eval_string(assigns: [block_list: block_list])
+    do: @template_block_list |> EEx.eval_string(assigns: [block_list: block_list]) |> to_string()
 
   defp deserialize_block_list(xml_body) do
     deserialize_block = fn node ->
@@ -157,79 +161,78 @@ defmodule Microsoft.Azure.Storage.Blob do
     end
   end
 
-  def upload_file(container = %Container{}, filename) do
-    mega_byte = 1024 * 1024
-    block_size = 4 * mega_byte
-    max_concurrency = 3
-    blob_name = String.replace(filename, Path.dirname(filename) <> "/", "") |> URI.encode()
-    blob = container |> __MODULE__.new(blob_name)
+  @spec upload_file(Container.t(), String.t()) :: {:ok, map} | {:error, map}
+  def upload_file(container = %Container{}, source_path, blob_name \\ nil) do
+    container
+    |> to_blob(source_path, blob_name)
+    |> upload_async(source_path)
+  end
 
-    %{size: size} = File.stat!(filename)
+  defp to_blob(container, source_path, nil) do
+    target_filename =
+      source_path
+      |> Path.basename()
+      |> URI.encode()
 
-    existing_block_ids =
-      case blob |> get_block_list(:all) do
-        {:error, %{status: 404}} ->
-          %{}
+    to_blob(container, source_path, target_filename)
+  end
 
-        {:ok, %{uncommitted_blocks: uncommitted_blocks, committed_blocks: committed_blocks}} ->
-          a =
-            uncommitted_blocks
-            |> Enum.reduce(%{}, fn %{name: name, size: size}, map ->
-              map |> Map.put(name, size)
-            end)
+  defp to_blob(container, _source_filename, target_filename) do
+    __MODULE__.new(container, target_filename)
+  end
 
-          committed_blocks
-          |> Enum.reduce(a, fn %{name: name, size: size}, map -> map |> Map.put(name, size) end)
-      end
-
-    {:ok, block_list_pid} = Agent.start_link(fn -> existing_block_ids end)
-
-    add_block = fn block_id, content ->
-      block_list_pid
-      |> Agent.update(&Map.put(&1, block_id, byte_size(content)))
+  defp upload_async(blob, filename) do
+    blob
+    |> upload_stream(filename)
+    |> stream_to_block_ids()
+    |> case do
+      {:error, _reason} = err ->
+        err
+      {:ok, ids} ->
+        commit_block_ids(blob, ids)
     end
+  end
 
-    uploaded_bytes = fn ->
-      block_list_pid
-      |> Agent.get(&(&1 |> Map.values() |> Enum.reduce(0, fn a, b -> a + b end)))
-    end
-
+  defp upload_stream(blob, filename) do
     filename
-    |> File.stream!([:read_ahead, :binary], block_size)
-    |> Stream.zip(1..50_000)
+    |> File.stream!([], @max_block_size)
+    |> Stream.zip(1..@max_number_of_blocks)
     |> Task.async_stream(
       fn {content, i} ->
-        block_id =
-          i
-          |> to_block_id()
+        block_id = to_block_id(i)
 
-        if !(existing_block_ids |> Map.has_key?(block_id)) do
-          IO.puts("Start to upload block #{i}")
+        case put_block(blob, block_id, content) do
+          {:ok, _} ->
+            block_id
 
-          {:ok, _} = blob |> put_block(block_id, content)
-
-          add_block.(block_id, content)
-
-          IO.puts("#{100 * uploaded_bytes.() / size}% (finished upload of #{i}")
+          {:error, _resp} = error ->
+            error
         end
       end,
-      max_concurrency: max_concurrency,
+      max_concurrency: @max_concurrency,
       ordered: true,
       timeout: :infinity
     )
     |> Enum.to_list()
+  end
 
-    in_storage =
-      block_list_pid
-      |> Agent.get(&(&1 |> Map.keys() |> Enum.into([])))
+  defp stream_to_block_ids(results) do
+    Enum.reduce_while(results, {:ok, []}, fn
+      {_, {:error, reason}}, {_status, _ids} ->
+        {:halt, {:error, reason}}
 
+      {_, id}, {status, ids} ->
+        {:cont, {status, [id | ids]}}
+    end)
+  end
+
+  defp commit_block_ids(blob, ids) do
     block_ids =
-      1..50_000
+      1..@max_number_of_blocks
       |> Enum.map(&to_block_id/1)
-      |> Enum.filter(&(&1 in in_storage))
+      |> Enum.filter(&(&1 in ids))
 
-    blob
-    |> put_block_list(block_ids)
+    put_block_list(blob, block_ids)
   end
 
   def delete_blob(

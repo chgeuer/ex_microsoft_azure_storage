@@ -48,7 +48,7 @@ defmodule Microsoft.Azure.Storage.BlobPolicy do
   """
 
   def serialize(policies) when is_list(policies),
-    do: @template |> EEx.eval_string(assigns: [policies: policies])
+    do: @template |> EEx.eval_string(assigns: [policies: policies]) |> Kernel.to_string()
 
   # def serialize(policies) when is_list(policies) do
   #   inner_xml =

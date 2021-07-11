@@ -5,6 +5,8 @@ defmodule Microsoft.Azure.Storage.Container do
   alias Microsoft.Azure.Storage
   alias Microsoft.Azure.Storage.{DateTimeUtils, BlobPolicy}
 
+  @type t :: %__MODULE__{container_name: String.t(), storage_context: map}
+
   @enforce_keys [:storage_context, :container_name]
   defstruct [:storage_context, :container_name]
 
@@ -15,6 +17,8 @@ defmodule Microsoft.Azure.Storage.Container do
   defmodule Responses do
     def list_containers_response(),
       do: [
+        max_results: ~x"/EnumerationResults/MaxResults/text()"s,
+        next_marker: ~x"/EnumerationResults/NextMarker/text()"s,
         containers: [
           ~x"/EnumerationResults/Containers/Container"l,
           name: ~x"./Name/text()"s,

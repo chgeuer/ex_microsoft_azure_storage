@@ -24,10 +24,9 @@ defmodule Microsoft.Azure.Storage.DateTimeUtils do
       |> String.replace_trailing("Z", "0Z")
 
   # "Tue, 05 Feb 2019 16:58:12 GMT" |> Microsoft.Azure.Storage.DateTimeUtils.date_parse_rfc1123()
-  def date_parse_rfc1123(str),
-    do:
-      str
-      |> Timex.parse!("{RFC1123}")
+  def date_parse_rfc1123(str) do
+    Timex.parse!(str, "{RFC1123}")
+  end
 
   def to_string(timex_time),
     # https://docs.microsoft.com/en-us/rest/api/storageservices/representation-of-date-time-values-in-headers

@@ -23,3 +23,5 @@ erl_crash.dump
 ex_microsoft_azure_storage-*.tar
 
 /.elixir_ls
+/.idea/
+*.iml
